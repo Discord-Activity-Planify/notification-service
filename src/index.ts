@@ -1,13 +1,15 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import cron from 'node-cron';
 import dayjs from 'dayjs';
-import { Card } from './db/models/Board/List/Card/Card'; // Replace with your DB model
+import { Card } from './db/models/Board/List/Card/Card';
+import { Style } from './db/models/Board/List/Card/Style';
 import { Assign } from './db/models/Board/List/Card/Assign'; // Replace with your DB model
 import { Project } from './db/models/Project'; // Replace with your DB model
 import { Board } from './db/models/Board/Board'; // Replace with your DB model
 import { initDB } from './db/initDB';
 import config from "./config";
 import { Op } from 'sequelize';
+import { createAvatarCollage } from './createAvatarCollage';
 
 // Initialize the database
 initDB();
@@ -26,7 +28,7 @@ client.once('ready', () => {
 });
 
 // Function to send DM to a user
-const sendDM = async (userId: string, message: string) => {
+const sendDM = async (userId: string, message: any) => {
     try {
         const user = await client.users.fetch(userId);
         await user.send(message);
@@ -84,7 +86,7 @@ const checkNotifications = async () => {
                     startDate: { [Op.lte]: today },
                     endDate: { [Op.gte]: today },
                 },
-                attributes: ["cardId", "name", "startDate", "endDate", "reminderDaysInterval", "lastReminderDate", "projectId", "boardId"],
+                attributes: ["cardId", "name", "startDate", "endDate", "reminderDaysInterval", "lastReminderDate", "projectId", "boardId", "styleId"],
                 limit: QUERY_LIMIT,
                 offset,
             });
@@ -95,7 +97,7 @@ const checkNotifications = async () => {
             }
 
             for (const card of cards) {
-                const { cardId, name, startDate, endDate, reminderDaysInterval, lastReminderDate, projectId, boardId } = card.toJSON();
+                const { styleId, cardId, name, startDate, endDate, reminderDaysInterval, lastReminderDate, projectId, boardId } = card.toJSON();
                 const lastReminder = dayjs(lastReminderDate || startDate);
                 const { projectName, boardName } = await fetchProjectAndBoardDetails(projectId, boardId);
 
@@ -105,13 +107,82 @@ const checkNotifications = async () => {
                         attributes: ['userId'],
                     });
 
+                    const userIds = assignments.map(assign => assign.toJSON().userId);
+
+                    // Fetch user details (avatar + username)
+                    const userDetails = await Promise.all(userIds.map(async (userId) => {
+                        try {
+                            const user = await client.users.fetch(userId);
+                            return {
+                                username: user.username,
+                                avatar: user.avatar
+                                ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`
+                                : user.defaultAvatarURL};
+                        } catch (error) {
+                            console.error(`Error fetching user ${userId}:`, error);
+                            return null;
+                        }
+                    }));
+            
+                    const avatars = userDetails.filter(Boolean).map(user => user?.avatar);
+            
+                    // Generate the avatar collage
+                    const collageBuffer = await createAvatarCollage(avatars);
+                    const assignedUsers = userDetails
+                    .filter(Boolean)
+                    .map(user => `${user?.username}`) // Clickable name linking to avatar
+                    .join(', ');
+
+                    const style = await Style.findOne({where: { styleId }})
+
+                    const formattedStartDate = dayjs(startDate).format('ddd DD/MM/YYYY HH:mm'); // Example: Mon 05 02 2025 14:30
+                    const formattedEndDate = dayjs(endDate).format('ddd DD/MM/YYYY HH:mm');     // Example: Wed 07 02 2025 18:00
+                    const daysLeft = dayjs(endDate).diff(dayjs(), 'days');
                     for (const assign of assignments) {
                         const userId = assign.toJSON().userId;
-                        const message = `Reminder for card "${name}" (ID: ${cardId}).
-Project: "${projectName}" (ID: ${projectId}),
-Board: "${boardName}" (ID: ${boardId}).
-Start: ${startDate}, End: ${endDate}., LastReminderDate: ${lastReminderDate}`;
-                        await sendDM(userId, message);
+                        const embed: any = {
+                            title: projectName,
+                            thumbnail: {
+                                url: await client?.user?.displayAvatarURL({ size: 128 }),
+                            },         
+                            color: parseInt(style?.toJSON().name, 16),
+                            fields: [
+                                    {
+                                        name: "Board",
+                                        value: boardName
+                                    },
+                                    {
+                                        name: "Task",
+                                        value: name
+                                    },
+                                    {
+                                        name: "Start Date",
+                                        value: formattedStartDate,
+                                        inline: true
+                                    },
+                                    {
+                                        name: "Due Date",
+                                        value: formattedEndDate,
+                                        inline: true
+                                    },
+                                    {
+                                        name: "Days Left",
+                                        value: `${daysLeft} days`
+                                    },
+                                    {
+                                        name: "Assigned Users",
+                                        value: assignedUsers
+                                    }
+                            ],
+                            image: { url: 'attachment://avatars.png'},
+                            footer: {
+                                text: 'Task Reminder',
+                            },
+                        }
+                        await sendDM(userId, {
+                            embeds: [embed],
+                            files: [{ attachment: collageBuffer, name: 'avatars.png' }]
+                        });
                     }
                     // Update last reminder date
                     const updateResult = await Card.update(
@@ -131,7 +202,7 @@ Start: ${startDate}, End: ${endDate}., LastReminderDate: ${lastReminderDate}`;
 
 // Schedule the job to run once a day at midnight
 // cron.schedule('0 0 * * *', checkNotifications);
-cron.schedule('* * * * *', checkNotifications); // Run every minute for testing
+cron.schedule('* * * * *', checkNotifications); // Run every minute for testing ** REMOVE THIS IN PRODUCTION**
 
 // Login bot
 client.login(botToken);
